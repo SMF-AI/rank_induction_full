@@ -4,14 +4,18 @@
 Official repository for:
 Kim et al., "Ranking-Aware Multiple Instance Learning for Histopathology Slide Classification"
 
-Overview
-Rank Induction is a training strategy for Multiple Instance Learning (MIL) that leverages expert annotations in a more flexible manner than traditional attention-based approaches. By ranking annotated lesion patches higher than non-lesion patches, our method guides the model to focus on diagnostically meaningful regions without over-constraining attention distribution.
 ## 🧠 Overview
 
-**Rank Induction** is a training strategy for Multiple Instance Learning (MIL) that leverages expert annotations using a **ranking constraint**—rather than exact attention matching—to guide the model’s focus toward diagnostically meaningful areas.
+**Rank Induction** is a training strategy for Multiple Instance Learning (MIL) that leverages expert annotations using a **ranking constraint**—rather than exact attention matching—to guide the model’s focus toward diagnostically meaningful areas.  By ranking annotated lesion patches higher than non-lesion patches, our method guides the model to focus on diagnostically meaningful regions without over-constraining attention distribution.
 
 > ⚠️ Most MIL methods either ignore expert annotations or enforce overly strict attention constraints.  
 > ✅ Our method strikes a balance by ranking annotated lesion patches higher than non-lesion ones—offering better interpretability and performance, especially in low-data regimes.
+
+![Figure 1](docs/images/figure1.jpg)
+
+**Figure 1.** *Model performance under data scarcity and interpretation.*  Left: Performance at varying sampling ratios.  Middle: WSI thumbnail.   Right: Corresponding attention heatmap.
+
+> As shown above, our method maintains stable performance across varying sampling ratios (left) and produces more accurate, interpretable attention maps (right). Red boxes highlight cancerous areas, while blue boxes indicate non-lesion regions.
 
 ---
 
