@@ -1,4 +1,5 @@
 # Rank Induction for Multiple Instance Learning
+![Python](https://img.shields.io/badge/python-3.8-blue.svg)
 
 Official repository for:
 Kim et al., "Ranking-Aware Multiple Instance Learning for Histopathology Slide Classification"
@@ -14,15 +15,72 @@ Rank Induction is a training strategy for Multiple Instance Learning (MIL) that 
 
 ---
 
-## 🔬 Method
+## 🔬 Key iead
 
-### 1. Ranking Constraint
+Most classic MIL methods only assume that the presence of at least one `positive` patch makes a slide positive, with no guidance on how *important* each patch is. In contrast, Rank Induction uses expert annotations (patches that are known to be lesion or non-lesion) to induce a pairwise *ranking* preference:
 
-For each annotated patch \( i \) and non-annotated patch \( j \), we enforce:
+- **Lesion patches** should have **higher** attention scores than
+- **Non-lesion patches**.
+
+Formally, for lesion patches \( s_i \) and non-lesion patches \( s_j \), we want:
 ```math
-s_i > s_j
+s_i > s_j \quad \text{for all} \; (i, j) \;\text{where} \; y_i = 1, \; y_j = 0.
 ```
-We convert the score difference to a pairwise ranking probability:
+### Pairwise Probability
+
+To implement this, we convert the **score difference** into a pairwise probability \( P_{i,j} \):
+
 ```math
-P_{i,j} = \frac{1}{1 + e^{-\sigma (s_i - s_j - m)}}
+    P_{i,j} \;=\; \frac{1}{1 + \exp\big[-\sigma ( s_i - s_j - m )\big]},
+```
+
+where
+- $s_i$ and $s_j$ are the **raw** attention score (before softmax),
+- $\sigma$ is a scaling factor,
+- $m$ is a margin to encourage a significant gap between lesion and non-lesion attention scores.
+
+### Rank Loss
+
+We define the **Rank Loss** $\mathcal{L}_\mathrm{rank}$ by comparing the predicted pairwise probability \($P_{i,j}$\) against the ground-truth preference \($\bar{P}_{i,j} \in \{0,1\} $\) (which indicates which patch should be ranked higher):
+
+```math
+\mathcal{L}_{\text{rank}} 
+    = \frac{1}{|\mathcal{P}|} \sum_{(i,j)\in \mathcal{P}}
+    -\bar{P}_{i,j} \,\log P_{i,j} \;-\; \bigl(1 - \bar{P}_{i,j}\bigr)\,\log\bigl(1 - P_{i,j}\bigr),
+```
+
+where \($\mathcal{P}$\) contains all valid (lesion–non-lesion) patch index pairs.  
+Finally, the **slide-level classification objective** (e.g., binary cross-entropy) and the rank loss are jointly optimized.
+
+---
+
+
+## 📊 Results
+
+### Camelyon16
+
+| Method              | AUROC         | AUPRC         |
+|---------------------|---------------|---------------|
+| AB-MIL              | 0.740 ± 0.146 | 0.730 ± 0.183 |
+| Attention Induction | 0.743 ± 0.142 | 0.727 ± 0.179 |
+| **Rank Induction**  | **0.836 ± 0.044** | **0.851 ± 0.036** |
+
+### DigestPath
+
+| Method              | AUROC         | AUPRC         |
+|---------------------|---------------|---------------|
+| AB-MIL              | 0.992 ± 0.002 | 0.989 ± 0.004 |
+| Attention Induction | 0.993 ± 0.002 | 0.990 ± 0.003 |
+| **Rank Induction**  | **0.995 ± 0.001** | **0.993 ± 0.002** |
+
+> 🧪 **Reproducibility**  
+To reproduce the above results, please refer to the Jupyter notebook provided in:
+```
+result/
+├── 0_loss.ipynb
+├── 1_performance.ipynb
+├── 2_posthoc.ipynb
+├── 3_data_scarcity.ipynb
+├── 4_granularity.ipynb
+└── 5_digestpath.ipynb
 ```
