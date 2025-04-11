@@ -1,8 +1,8 @@
 from setuptools import find_packages, setup
 
 setup(
-    name="camelyon",
-    version="0.5",
+    name="rank_induction",
+    version="0.1",
     packages=find_packages(),
     package_dir={"": "."},
 )
