@@ -1,8 +1,10 @@
 # Rank Induction for Multiple Instance Learning
 ![Python](https://img.shields.io/badge/python-3.8-blue.svg)
+![MIDL 2025](https://img.shields.io/badge/MIDL-2025-brightgreen)
+
 
 Official repository for:
-Kim et al., "Ranking-Aware Multiple Instance Learning for Histopathology Slide Classification"
+Kim et al., "Ranking-Aware Multiple Instance Learning for Histopathology Slide Classification" presented at the **Medical Imaging with Deep Learning (MIDL) 2025** conference.
 
 ## 🧠 Overview
 
