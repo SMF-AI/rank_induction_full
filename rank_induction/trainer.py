@@ -351,3 +351,110 @@ class MixedSupervisionTrainer(BinaryClassifierTrainer):
             bar.finish()
 
         return (loss_meter, metrics_meter)
+
+
+class CLAMTrainer(BinaryClassifierTrainer):
+    """
+    CLAM 모델 전용 trainer.
+
+    bag–level 예측(loss)와 instance–level 평가(loss)를 함께 계산하여
+    총 손실을 bag_weight에 따라 가중합한 후 학습하는 구조입니다.
+
+    인자:
+      - model: CLAM_SB 또는 CLAM_MB 모델 (forward에서 (logits, Y_prob, Y_hat, A_raw, instance_dict)를 반환)
+      - loss_fn: bag–level 손실 함수 (예: nn.CrossEntropyLoss)
+      - optimizer: 모델 최적화 옵티마이저
+      - bag_weight: bag loss에 대한 가중치 (0 ~ 1 사이 값, instance loss 가중치는 1 - bag_weight)
+      - logger: 로깅용 logger (옵션)
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.modules.Module,
+        loss: torch.nn.modules.loss._Loss,
+        optimizer: torch.optim.Optimizer = None,
+        bag_weight: float = 0.5,
+        logger: logging.Logger = None,
+    ):
+        self.model = model
+        self.loss = loss
+        self.optimizer = optimizer
+        self.bag_weight = bag_weight
+        self.logger = logger
+
+    def run_epoch(
+        self,
+        dataloader: DataLoader,
+        phase: Literal["train", "val", "test"],
+        current_epoch: int,
+        accumulation_steps: int = 1,
+        verbose: bool = True,
+    ) -> Tuple[AverageMeter, MetricsMeter]:
+        total_step = len(dataloader)
+        if verbose:
+            bar = Bar(max=total_step, check_tty=False)
+
+        loss_meter = AverageMeter("loss")
+        metrics_meter = MetricsMeter(name=phase, accuracy_threshold=0.5)
+        for step, batch in enumerate(dataloader, start=1):
+            xs, ys = batch
+            data = xs.squeeze(0)
+            label = ys.squeeze(0).long()
+
+            if phase == "train":
+                self.model.train()
+                # CLAM의 forward는 label과 instance_eval 플래그를 인자로 받음
+                logits, Y_prob, Y_hat, A_raw, instance_dict = self.model(
+                    data, label=label, instance_eval=True
+                )
+            else:
+                self.model.eval()
+                with torch.no_grad():
+                    logits, Y_prob, Y_hat, A_raw, instance_dict = self.model(
+                        data, label=label, instance_eval=False
+                    )
+
+            # bag–level 손실 계산 (예: CrossEntropyLoss 등)
+            bag_loss = self.loss(logits, label)
+            # instance–level 손실은 instance_dict에서 가져옴 (없으면 기본 0.0)
+            instance_loss = instance_dict.get("instance_loss", 0.0)
+
+            # 손실 가중합 (필요에 따라 가중치 조절 가능)
+            loss = self.bag_weight * bag_loss + (1 - self.bag_weight) * instance_loss
+            loss = loss / accumulation_steps
+
+            if phase == "train":
+                loss.backward()
+                if step % accumulation_steps == 0 or (step == total_step):
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+
+            # metric 업데이트 시 bag-level 예측(Y_hat) 사용 (다른 메트릭 추가 가능)
+            loss_meter.update(loss.item() * accumulation_steps, len(ys))
+            # 기존에는 torch.sigmoid(logits) 등을 사용했으나, Y_prob를 사용해도 무방합니다.
+            if logits.numel() == 1:
+                model_confidence = torch.sigmoid(logits).item()
+            else:
+                # Y_prob shape = [1, 2], index 1이 positive class
+                model_confidence = Y_prob[0, 1].item()
+            metrics_meter.update(
+                [model_confidence],
+                [ys.item()],
+            )
+
+            if verbose:
+                bar.suffix = self.make_bar_sentence(
+                    phase=phase,
+                    epoch=current_epoch,
+                    step=step,
+                    total_step=total_step,
+                    eta=bar.eta,
+                    total_loss=loss_meter.avg,
+                    metrics_meter=metrics_meter,
+                )
+                bar.next()
+
+        if verbose:
+            bar.finish()
+
+        return (loss_meter, metrics_meter)

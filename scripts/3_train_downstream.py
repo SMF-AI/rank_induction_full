@@ -17,8 +17,12 @@ from rank_induction.datasets import (
     DigestPathRankNetInductionDataset,
     get_balanced_weight_sequence,
 )
-from rank_induction.networks.mil import AttentionBasedFeatureMIL
-from rank_induction.trainer import BinaryClassifierTrainer, MixedSupervisionTrainer
+from rank_induction.networks.mil import AttentionBasedFeatureMIL, CLAM_SB, CLAM_MB
+from rank_induction.trainer import (
+    BinaryClassifierTrainer,
+    MixedSupervisionTrainer,
+    CLAMTrainer,
+)
 from rank_induction.losses import AttentionInductionLoss, RankNetLoss, get_pos_weight
 from rank_induction.log_ops import TRACKING_URI, get_experiment
 from rank_induction.misc import seed_everything, worker_init_fn
@@ -32,6 +36,7 @@ def get_args() -> argparse.Namespace:
             --data_dir /CAMELYON16/feature/resnet18 \\ 
             --slide_dir /CAMELYON16/slide \\ 
             --learning 'attention_induction' \\ 
+            --model_type 'attention' \\
             --run_name linear_prob_atten_resnet18 \\
             --in_features 1024
             """
@@ -61,6 +66,15 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument("--in_features", type=int, default=512, required=True)
 
+    # 모델 타입 선택
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        choices=["attention", "clam_sb", "clam_mb"],
+        default="attention",
+        help="Model architecture to use",
+    )
+
     # Required arguments
     parser.add_argument("--mpp", type=float, default=0.25, required=True)
     parser.add_argument(
@@ -84,6 +98,15 @@ def get_args() -> argparse.Namespace:
         choices=["camelyon", "digest"],
         default="camelyon",
         help="which WSI collection to use",
+    )
+
+    # CLAM 관련 인자들
+    parser.add_argument(
+        "--inst_loss",
+        type=str,
+        choices=["svm", "ce", None],
+        default="svm",
+        help="instance-level clustering loss function (default: svm)",
     )
 
     # Optional arguments
@@ -227,9 +250,7 @@ def get_train_val_test_dataset(
         annotation_dir = os.path.join(
             "/DigestPath2019/task2_classification", "annotations"
         )
-        image_dir = (
-            "/DigestPath2019/task2_classification/patch/224"
-        )
+        image_dir = "/DigestPath2019/task2_classification/patch/224"
 
     train_dataset: Dataset = ds_cls(
         root_dir=os.path.join(data_dir, "train"),
@@ -389,6 +410,7 @@ if __name__ == "__main__":
     args = get_args()
     seed_everything(args.random_state)
 
+    # 데이터셋 로딩
     if args.learning == "base":
         train_dataset, val_dataset, test_dataset = get_train_val_test_dataset_base(
             args.data_dir,
@@ -421,6 +443,7 @@ if __name__ == "__main__":
             dataset=args.dataset,
         )
 
+    # 데이터로더 설정
     weights = get_balanced_weight_sequence(train_dataset)
     sampler = torch.utils.data.WeightedRandomSampler(weights, len(weights))
     train_dataloader = DataLoader(
@@ -440,56 +463,84 @@ if __name__ == "__main__":
         test_dataset, num_workers=args.num_workers, shuffle=True
     )
 
-    if args.learning == "attention_induction":
-        return_with = "attention_weight"
-    elif args.learning == "ltr":
-        return_with = "attention_score"
-    elif args.learning == "base":
-        return_with = "contribution"
-    else:
-        raise ValueError(
-            f"learning({args.learning}) must be one of 'attention_induction' or 'ltr'"
-        )
+    # 모델 설정
+    if args.model_type == "attention":
+        if args.learning == "attention_induction":
+            return_with = "attention_weight"
+        elif args.learning == "ltr":
+            return_with = "attention_score"
+        elif args.learning == "base":
+            return_with = "contribution"
+        else:
+            raise ValueError(
+                f"learning({args.learning}) must be one of 'attention_induction' or 'ltr'"
+            )
 
-    model = AttentionBasedFeatureMIL(
-        in_features=args.in_features,
-        adaptor_dim=256,
-        num_classes=args.n_classes,
-        threshold=args.threshold,
-        return_with=return_with,
-    ).to(args.device)
+        model = AttentionBasedFeatureMIL(
+            in_features=args.in_features,
+            adaptor_dim=256,
+            num_classes=args.n_classes,
+            threshold=args.threshold,
+            return_with=return_with,
+        ).to(args.device)
+
+    elif args.model_type in ["clam_sb", "clam_mb"]:
+        if args.inst_loss == "svm":
+            from topk.svm import SmoothTop1SVM
+
+            instance_loss_fn = SmoothTop1SVM(n_classes=2).cuda(device=args.device)
+        else:
+            instance_loss_fn = nn.CrossEntropyLoss()
+
+        if args.model_type == "clam_sb":
+            model = CLAM_SB(args.in_features, instance_loss_fn=instance_loss_fn)
+        elif args.model_type == "clam_mb":
+            model = CLAM_MB(args.in_features, instance_loss_fn=instance_loss_fn)
+
+        model = model.to(args.device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
-    weight = None
-    if args.use_balanced_weight:
-        weight = get_pos_weight(train_dataset.bag_labels).to(args.device)
+    # 트레이너 설정
+    if args.model_type in ["clam_sb", "clam_mb"]:
+        trainer = CLAMTrainer(
+            model=model,
+            loss=torch.nn.CrossEntropyLoss(),
+            optimizer=optimizer,
+            bag_weight=0.7,
+        )
+    else:
+        weight = None
+        if args.use_balanced_weight:
+            weight = get_pos_weight(train_dataset.bag_labels).to(args.device)
 
-    if args.learning == "base":
-        trainer = BinaryClassifierTrainer(
-            model=model,
-            loss=torch.nn.BCEWithLogitsLoss(pos_weight=weight),
-            optimizer=optimizer,
-        )
-    elif args.learning == "attention_induction":
-        trainer = MixedSupervisionTrainer(
-            model=model,
-            loss=AttentionInductionLoss(_lambda=args._lambda, pos_weight=weight),
-            optimizer=optimizer,
-        )
-    elif args.learning == "ltr":
-        trainer = MixedSupervisionTrainer(
-            model=model,
-            loss=RankNetLoss(
-                _lambda=args._lambda,
-                sigma=args.sigma,
-                ignore_equal=args.ignore_equal,
-                num_pos=args.num_pos,
-                num_neg=args.num_neg,
-                device=args.device,
-            ),
-            optimizer=optimizer,
-        )
+        if args.learning == "base":
+            trainer = BinaryClassifierTrainer(
+                model=model,
+                loss=torch.nn.BCEWithLogitsLoss(pos_weight=weight),
+                optimizer=optimizer,
+            )
+        elif args.learning == "attention_induction":
+            trainer = MixedSupervisionTrainer(
+                model=model,
+                loss=AttentionInductionLoss(_lambda=args._lambda, pos_weight=weight),
+                optimizer=optimizer,
+            )
+        elif args.learning == "ltr":
+            trainer = MixedSupervisionTrainer(
+                model=model,
+                loss=RankNetLoss(
+                    _lambda=args._lambda,
+                    sigma=args.sigma,
+                    ignore_equal=args.ignore_equal,
+                    num_pos=args.num_pos,
+                    num_neg=args.num_neg,
+                    device=args.device,
+                ),
+                optimizer=optimizer,
+            )
 
+    # MLflow 설정 및 학습
     mlflow.set_tracking_uri(TRACKING_URI)
     exp = get_experiment(args.experiment_name)
     with mlflow.start_run(experiment_id=exp.experiment_id, run_name=args.run_name):
